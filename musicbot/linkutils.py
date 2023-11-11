@@ -1,7 +1,6 @@
 import re
-import sys
 from enum import Enum
-from typing import Optional, Union, List
+from typing import Optional, Union
 
 import aiohttp
 import spotipy
@@ -20,31 +19,20 @@ except Exception:
     api = False
 
 url_regex = re.compile(
-    r"""http[s]?://(?:
-        [a-zA-Z]
-        |[0-9]
-        |[$-_@.&+]
-        |[!*\(\),]
-        |(?:%[0-9a-fA-F][0-9a-fA-F])
-    )+""",
-    re.VERBOSE,
+    r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
 )
-album_regex = re.compile(r"^https://open\.spotify\.com/([^/]+/)?album")
 
 headers = {
-    "User-Agent": " ".join(
-        (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "AppleWebKit/537.36 (KHTML, like Gecko)",
-            "Chrome/113.0.5672.126",
-            "Safari/537.36",
-        )
-    )
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36"
 }
 
 
+def clean_sclink(track: str) -> str:
+    return re.sub(r"^https?://m\.", "https://", track)
+
+
 async def convert_spotify(url: str) -> str:
-    "Fetches song name from Spotify URL"
+
     result = url_regex.search(url)
     if result and "?si=" in url:
         url = result.group(0) + "&nd=1"
@@ -56,20 +44,18 @@ async def convert_spotify(url: str) -> str:
     soup = BeautifulSoup(page, "html.parser")
 
     title = soup.find("title").string
-    return re.sub(
-        r"(.*) - song( and lyrics)? by (.*) \| Spotify", r"\1 \3", title
-    )
+    return re.sub(r"(.*) - song( and lyrics)? by (.*) \| Spotify", r"\1 \3", title)
 
 
 async def get_spotify_playlist(url: str) -> list:
-    """Returns list of Spotify links"""
+    """Return Spotify_Playlist class"""
 
     code = url.split("/")[4].split("?")[0]
 
     if api:
         results = None
         try:
-            if is_sp_album(url):
+            if "open.spotify.com/album" in url:
                 results = sp_api.album_tracks(code)
 
             if "open.spotify.com/playlist" in url:
@@ -84,19 +70,14 @@ async def get_spotify_playlist(url: str) -> list:
                 for track in tracks:
                     try:
                         links.append(
-                            track.get("track", track)["external_urls"][
-                                "spotify"
-                            ]
+                            track.get("track", track)["external_urls"]["spotify"]
                         )
                     except KeyError:
                         pass
                 return links
         except Exception:
             if config.SPOTIFY_ID != "" or config.SPOTIFY_SECRET != "":
-                print(
-                    "ERROR: Check spotify CLIENT_ID and SECRET",
-                    file=sys.stderr,
-                )
+                print("ERROR: Check spotify CLIENT_ID and SECRET")
 
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url + "&nd=1") as response:
@@ -117,12 +98,11 @@ async def get_spotify_playlist(url: str) -> list:
     return links
 
 
-def get_urls(content: str) -> List[str]:
-    return url_regex.findall(content)
-
-
-def is_sp_album(url: str) -> bool:
-    return bool(album_regex.match(url))
+def get_url(content: str) -> Optional[str]:
+    result = url_regex.search(content)
+    if result:
+        return result.group(0)
+    return None
 
 
 class Sites(Enum):
@@ -155,10 +135,13 @@ def identify_url(url: Optional[str]) -> Sites:
     if "https://www.youtu" in url or "https://youtu.be" in url:
         return Sites.YouTube
 
-    if re.match(r"^https://open\.spotify\.com/([^/]+/)?track", url):
+    if "https://open.spotify.com/track" in url:
         return Sites.Spotify
 
-    if "https://open.spotify.com/playlist" in url or is_sp_album(url):
+    if (
+        "https://open.spotify.com/playlist" in url
+        or "https://open.spotify.com/album" in url
+    ):
         return Sites.Spotify_Playlist
 
     if "bandcamp.com/track/" in url:
@@ -184,7 +167,10 @@ def identify_playlist(url: Optional[str]) -> Union[Sites, Playlist_Types]:
     if "playlist?list=" in url:
         return Playlist_Types.YouTube_Playlist
 
-    if "https://open.spotify.com/playlist" in url or is_sp_album(url):
+    if (
+        "https://open.spotify.com/playlist" in url
+        or "https://open.spotify.com/album" in url
+    ):
         return Playlist_Types.Spotify_Playlist
 
     if "bandcamp.com/album/" in url:

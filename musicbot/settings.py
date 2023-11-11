@@ -1,20 +1,18 @@
 import json
 import os
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import discord
-from discord import Option, TextChannel, VoiceChannel, Role
+from discord.ext import commands
 import sqlalchemy
-from sqlalchemy import String, select
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import Column, String, Integer, Boolean, select
+from sqlalchemy.orm import declarative_base
 from alembic.migration import MigrationContext
 from alembic.autogenerate import produce_migrations, render_python_code
 from alembic.operations import Operations
-from typing_extensions import Annotated
 
-from config import config
 from musicbot import utils
-from musicbot.utils import StrEnum
+from config import config
 
 # avoiding circular import
 if TYPE_CHECKING:
@@ -25,119 +23,39 @@ LEGACY_SETTINGS = DIR_PATH + "/generated/settings.json"
 DEFAULT_CONFIG = {
     "command_channel": None,
     "start_voice_channel": None,
-    "dj_role": None,
     "user_must_be_in_vc": True,
     "button_emote": None,
     "default_volume": 100,
-    "vc_timeout": config.VC_TIMEOUT_DEFAULT,
+    "vc_timeout": config.VC_TIMOUT_DEFAULT,
     "announce_songs": sqlalchemy.false(),
 }
-# use String for ids to be sure we won't hit overflow
 ID_LENGTH = 25  # more than enough to be sure :)
-DiscordIdStr = Annotated[str, ID_LENGTH]
-
-
-class Base(DeclarativeBase):
-    type_annotation_map = {
-        DiscordIdStr: String(ID_LENGTH),
-    }
-
-
-ConversionErrorText = StrEnum(
-    "ConversionErrorText", config.get_dict("ConversionError")
-)
-SettingsEmbed = StrEnum("SettingsEmbed", config.get_dict("SettingsEmbed"))
-
-
-class ConversionError(Exception):
-    pass
-
-
-def convert_emoji(ctx: "Context", value: Optional[str]) -> Optional[str]:
-    if not config.ENABLE_BUTTON_PLUGIN:
-        raise ConversionError(ConversionErrorText.BUTTON_DISABLED)
-
-    if value is None:
-        return None
-
-    emoji = utils.get_emoji(ctx.guild, value)
-    if emoji is None:
-        raise ConversionError(ConversionErrorText.INVALID_EMOJI)
-    elif isinstance(emoji, discord.Emoji):
-        emoji = str(emoji.id)
-    return emoji
-
-
-def convert_object(
-    ctx: "Context", value: Optional[discord.Object]
-) -> Optional[str]:
-    if value is None:
-        return None
-
-    return str(value.id)
-
-
-def convert_bool(ctx: "Context", value: bool) -> bool:
-    return value
-
-
-def convert_volume(ctx: "Context", value: int) -> int:
-    if value > 100 or value < 0:
-        raise ConversionError(ConversionErrorText.INVALID_VOLUME)
-    return value
-
-
-CONFIG_CONVERTERS = {
-    "command_channel": convert_object,
-    "start_voice_channel": convert_object,
-    "dj_role": convert_object,
-    "user_must_be_in_vc": convert_bool,
-    "button_emote": convert_emoji,
-    "default_volume": convert_volume,
-    "vc_timeout": convert_bool,
-    "announce_songs": convert_bool,
-}
-CONFIG_OPTIONS = {
-    "command_channel": Option(
-        Union[TextChannel, VoiceChannel], required=False
-    ),
-    "start_voice_channel": Option(VoiceChannel, required=False),
-    "dj_role": Option(Role, required=False),
-    "user_must_be_in_vc": Option(bool),
-    "button_emote": Option(str, required=False),
-    "default_volume": Option(int, min_value=0, max_value=100),
-    "vc_timeout": Option(bool),
-    "announce_songs": Option(bool),
-}
+Base = declarative_base()
 
 
 class GuildSettings(Base):
     __tablename__ = "settings"
 
-    guild_id: Mapped[DiscordIdStr] = mapped_column(primary_key=True)
-    command_channel: Mapped[Optional[DiscordIdStr]]
-    start_voice_channel: Mapped[Optional[DiscordIdStr]]
-    dj_role: Mapped[Optional[DiscordIdStr]]
-    user_must_be_in_vc: Mapped[bool]
-    button_emote: Mapped[Optional[DiscordIdStr]]
-    default_volume: Mapped[int]
-    vc_timeout: Mapped[bool]
-    announce_songs: Mapped[bool] = mapped_column(
-        server_default=DEFAULT_CONFIG["announce_songs"]
+    # use String for ids to be sure we won't hit overflow
+    guild_id: str = Column(String(ID_LENGTH), primary_key=True)
+    command_channel: Optional[str] = Column(String(ID_LENGTH))
+    start_voice_channel: Optional[str] = Column(String(ID_LENGTH))
+    user_must_be_in_vc: bool = Column(Boolean, nullable=False)
+    button_emote: Optional[str] = Column(String(ID_LENGTH))
+    default_volume: int = Column(Integer, nullable=False)
+    vc_timeout: bool = Column(Boolean, nullable=False)
+    announce_songs: bool = Column(
+        Boolean, nullable=False, server_default=DEFAULT_CONFIG["announce_songs"]
     )
 
     @classmethod
-    async def load(
-        cls, bot: "MusicBot", guild: discord.Guild
-    ) -> "GuildSettings":
+    async def load(cls, bot: "MusicBot", guild: discord.Guild) -> "GuildSettings":
         "Load object from database or create a new one and commit it"
         guild_id = str(guild.id)
         async with bot.DbSession() as session:
             sett = (
                 await session.execute(
-                    select(GuildSettings).where(
-                        GuildSettings.guild_id == guild_id
-                    )
+                    select(GuildSettings).where(GuildSettings.guild_id == guild_id)
                 )
             ).scalar_one_or_none()
             if sett:
@@ -146,9 +64,7 @@ class GuildSettings(Base):
             # avoiding incomplete detached object
             sett = (
                 await session.execute(
-                    select(GuildSettings).where(
-                        GuildSettings.guild_id == guild_id
-                    )
+                    select(GuildSettings).where(GuildSettings.guild_id == guild_id)
                 )
             ).scalar_one()
             await session.commit()
@@ -158,17 +74,14 @@ class GuildSettings(Base):
     async def load_many(
         cls, bot: "MusicBot", guilds: List[discord.Guild]
     ) -> Dict[discord.Guild, "GuildSettings"]:
-        """Load list of objects from database
-        Creates new ones when not found
+        """Load list of objects from database and create new ones when not found.
         Returns dict with guilds as keys and their settings as values"""
         ids = [str(g.id) for g in guilds]
         async with bot.DbSession() as session:
             settings = (
                 (
                     await session.execute(
-                        select(GuildSettings).where(
-                            GuildSettings.guild_id.in_(ids)
-                        )
+                        select(GuildSettings).where(GuildSettings.guild_id.in_(ids))
                     )
                 )
                 .scalars()
@@ -180,9 +93,7 @@ class GuildSettings(Base):
             settings.extend(
                 (
                     await session.execute(
-                        select(GuildSettings).where(
-                            GuildSettings.guild_id.in_(missing)
-                        )
+                        select(GuildSettings).where(GuildSettings.guild_id.in_(missing))
                     )
                 )
                 .scalars()
@@ -195,14 +106,14 @@ class GuildSettings(Base):
 
     def format(self, ctx: "Context"):
         embed = discord.Embed(
-            title=SettingsEmbed.TITLE,
-            description=ctx.guild.name,
-            color=config.EMBED_COLOR,
+            title="Settings", description=ctx.guild.name, color=config.EMBED_COLOR
         )
 
         if ctx.guild.icon:
             embed.set_thumbnail(url=ctx.guild.icon.url)
-        embed.set_footer(text=SettingsEmbed.FOOTER)
+        embed.set_footer(
+            text="Usage: {}set setting_name value".format(config.BOT_PREFIX)
+        )
 
         # exclusion_keys = ['id']
 
@@ -211,19 +122,13 @@ class GuildSettings(Base):
             #     continue
 
             if not getattr(self, key):
-                embed.add_field(
-                    name=key, value=SettingsEmbed.FIELD_EMPTY, inline=False
-                )
+                embed.add_field(name=key, value="Not Set", inline=False)
                 continue
 
             elif key == "start_voice_channel":
                 vc = ctx.guild.get_channel(int(self.start_voice_channel))
                 embed.add_field(
-                    name=key,
-                    value=vc.name
-                    if vc
-                    else SettingsEmbed.INVALID_VOICE_CHANNEL,
-                    inline=False,
+                    name=key, value=vc.name if vc else "Invalid VChannel", inline=False
                 )
                 continue
 
@@ -231,16 +136,7 @@ class GuildSettings(Base):
                 chan = ctx.guild.get_channel(int(self.command_channel))
                 embed.add_field(
                     name=key,
-                    value=chan.name if chan else SettingsEmbed.INVALID_CHANNEL,
-                    inline=False,
-                )
-                continue
-
-            elif key == "dj_role":
-                role = ctx.guild.get_role(int(self.dj_role))
-                embed.add_field(
-                    name=key,
-                    value=role.name if role else SettingsEmbed.INVALID_ROLE,
+                    value=chan.name if chan else "Invalid Channel",
                     inline=False,
                 )
                 continue
@@ -254,27 +150,160 @@ class GuildSettings(Base):
 
         return embed
 
-    async def update_setting(
+    async def process_setting(
         self, setting: str, value: str, ctx: "Context"
-    ) -> bool:
+    ) -> Optional[bool]:
+
         if setting not in DEFAULT_CONFIG:
+            return None
+
+        return await getattr(self, "set_" + setting)(setting, value, ctx)
+
+    # -----setting methods-----
+
+    async def set_command_channel(self, setting, value, ctx):
+
+        if value.lower() == "unset":
+            self.command_channel = None
+            return True
+
+        chan = None
+        for converter in (
+            commands.TextChannelConverter,
+            commands.VoiceChannelConverter,
+        ):
+            try:
+                chan = await converter().convert(ctx, value)
+                break
+            except commands.ChannelNotFound:
+                pass
+
+        if not chan:
+            await ctx.send(
+                "`Error: Channel not found`\nUsage: {}set {} channel\nOther options: unset".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
+        self.command_channel = str(chan.id)
+        return True
+
+    async def set_start_voice_channel(self, setting, value, ctx):
+
+        if value.lower() == "unset":
+            self.start_voice_channel = None
+            return True
+
+        try:
+            vc = await commands.VoiceChannelConverter().convert(ctx, value)
+        except commands.ChannelNotFound:
+            await ctx.send(
+                "`Error: Voice channel not found`\nUsage: {}set {} vchannel\nOther options: unset".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
+        self.start_voice_channel = str(vc.id)
+        return True
+
+    async def set_user_must_be_in_vc(self, setting, value, ctx):
+        if value.lower() == "true":
+            self.user_must_be_in_vc = True
+        elif value.lower() == "false":
+            self.user_must_be_in_vc = False
+        else:
+            await ctx.send(
+                "`Error: Value must be True/False`\nUsage: {}set {} True/False".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
+        return True
+
+    async def set_button_emote(self, setting, value, ctx):
+        if not config.ENABLE_BUTTON_PLUGIN:
+            await ctx.send("`Error: Button plugin is disabled`")
             return False
 
-        value = CONFIG_CONVERTERS[setting](ctx, value)
-        setattr(self, setting, value)
-        async with ctx.bot.DbSession() as session:
-            session.add(self)
-            await session.commit()
+        if value.lower() == "unset":
+            self.button_emote = None
+            return True
+
+        emoji = utils.get_emoji(ctx.guild, value)
+        if emoji is None:
+            await ctx.send(
+                "`Error: Invalid emote`\nUsage: {}set {} emote\nOther options: unset".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
+        elif isinstance(emoji, discord.Emoji):
+            emoji = str(emoji.id)
+        self.button_emote = emoji
+        return True
+
+    async def set_default_volume(self, setting, value, ctx):
+        try:
+            value = int(value)
+        except ValueError:
+            await ctx.send(
+                "`Error: Value must be a number`\nUsage: {}set {} 0-100".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
+
+        if value > 100 or value < 0:
+            await ctx.send(
+                "`Error: Value must be a number`\nUsage: {}set {} 0-100".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
+
+        self.default_volume = value
+        return True
+
+    async def set_vc_timeout(self, setting, value, ctx):
+
+        if not config.ALLOW_VC_TIMEOUT_EDIT:
+            await ctx.send("`Error: This value cannot be modified`")
+            return False
+
+        if value.lower() == "true":
+            self.vc_timeout = True
+            self.start_voice_channel = None
+        elif value.lower() == "false":
+            self.vc_timeout = False
+        else:
+            await ctx.send(
+                "`Error: Value must be True/False`\nUsage: {}set {} True/False".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
+        return True
+
+    async def set_announce_songs(self, setting, value, ctx):
+        if value.lower() == "true":
+            self.announce_songs = True
+        elif value.lower() == "false":
+            self.announce_songs = False
+        else:
+            await ctx.send(
+                "`Error: Value must be True/False`\nUsage: {}set {} True/False".format(
+                    config.BOT_PREFIX, setting
+                )
+            )
+            return False
         return True
 
 
 def run_migrations(connection):
-    """Automatically creates or deletes tables and columns
-    Reflects code changes"""
+    "Automatically creates or deletes tables and columns, reflecting code changes"
     ctx = MigrationContext.configure(connection)
     code = render_python_code(
-        produce_migrations(ctx, Base.metadata).upgrade_ops,
-        migration_context=ctx,
+        produce_migrations(ctx, Base.metadata).upgrade_ops, migration_context=ctx
     )
     if connection.engine.echo:
         # debug mode
@@ -308,9 +337,7 @@ async def extract_legacy_settings(bot: "MusicBot"):
             if guild_id in existing:
                 continue
             new_settings = DEFAULT_CONFIG.copy()
-            new_settings.update(
-                {k: v for k, v in data.items() if k in new_settings}
-            )
+            new_settings.update({k: v for k, v in data.items() if k in new_settings})
             session.add(GuildSettings(guild_id=guild_id, **new_settings))
         await session.commit()
     os.rename(LEGACY_SETTINGS, LEGACY_SETTINGS + ".back")

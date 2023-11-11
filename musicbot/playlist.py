@@ -5,16 +5,7 @@ from collections import deque
 from discord import Embed
 
 from config import config
-from musicbot.utils import StrEnum
 from musicbot.songinfo import Song
-
-
-LoopMode = StrEnum("LoopMode", config.get_dict("LoopMode"))
-LoopState = StrEnum("LoopState", config.get_dict("LoopState"))
-PauseState = StrEnum("PauseState", config.get_dict("PauseState"))
-PlaylistErrorText = StrEnum(
-    "PlaylistErrorText", config.get_dict("PlaylistError")
-)
 
 
 class PlaylistError(Exception):
@@ -22,19 +13,17 @@ class PlaylistError(Exception):
 
 
 class Playlist:
-    """Stores the youtube links of songs to be played and already played
-    Offers basic operation on the queues"""
+    """Stores the youtube links of songs to be played and already played and offers basic operation on the queues"""
 
     def __init__(self):
         # Stores the links os the songs in queue and the ones already played
         self.playque: deque[Song] = deque()
         self.playhistory: deque[Song] = deque()
 
-        # A seperate history that remembers
-        # the names of the tracks that were played
+        # A seperate history that remembers the names of the tracks that were played
         self.trackname_history: deque[str] = deque()
 
-        self.loop = LoopMode.OFF
+        self.loop = "off"
 
     def __len__(self):
         return len(self.playque)
@@ -48,23 +37,16 @@ class Playlist:
         self.playque.append(track)
 
     def has_next(self) -> bool:
-        return len(self.playque) >= (2 if self.loop != LoopMode.ALL else 1)
+        return len(self.playque) >= (2 if self.loop == "off" else 1)
 
     def has_prev(self) -> bool:
-        return (
-            len(
-                self.playhistory if self.loop != LoopMode.ALL else self.playque
-            )
-            != 0
-        )
+        return len(self.playhistory if self.loop == "off" else self.playque) != 0
 
-    def next(self, ignore_single_loop=False) -> Optional[Song]:
+    def next(self) -> Optional[Song]:
         if len(self.playque) == 0:
             return None
 
-        if self.loop == LoopMode.OFF or (
-            ignore_single_loop and self.loop == LoopMode.SINGLE
-        ):
+        if self.loop == "off":
             self.playhistory.append(self.playque.popleft())
             if len(self.playhistory) > config.MAX_HISTORY_LENGTH:
                 self.playhistory.popleft()
@@ -73,13 +55,13 @@ class Playlist:
             else:
                 return None
 
-        if self.loop == LoopMode.ALL:
+        if self.loop == "all":
             self.playque.rotate(-1)
 
         return self.playque[0]
 
     def prev(self) -> Optional[Song]:
-        if self.loop != LoopMode.ALL:
+        if self.loop == "off":
             if len(self.playhistory) != 0:
                 song = self.playhistory.pop()
                 self.playque.appendleft(song)
@@ -90,7 +72,8 @@ class Playlist:
         if len(self.playque) == 0:
             return None
 
-        self.playque.rotate()
+        if self.loop == "all":
+            self.playque.rotate()
 
         return self.playque[0]
 
@@ -99,34 +82,33 @@ class Playlist:
         random.shuffle(self.playque)
         self.playque.appendleft(first)
 
-    def clear(self):
-        if self.playque:
-            first = self.playque.popleft()
-            self.playque.clear()
-            self.playque.appendleft(first)
-
-    def _check_and_get(self, index: int) -> Song:
-        """Checks if song at `index` can be moved
-        Returns the song or raises PlaylistError with description"""
-        if index < 0:
-            raise PlaylistError(PlaylistErrorText.NEGATIVE_INDEX)
-        if index == 0:
-            raise PlaylistError(PlaylistErrorText.ZERO_INDEX)
-        try:
-            return self.playque[index]
-        except IndexError as e:
-            raise PlaylistError(PlaylistErrorText.MISSING_INDEX) from e
-
     def remove(self, index: int) -> Song:
-        song = self._check_and_get(index)
+        if index < 0:
+            raise PlaylistError("Negative indexes are not supported.")
+        if index == 0:
+            raise PlaylistError(
+                "Cannot remove the first song since it's already playing."
+            )
+        try:
+            song = self.playque[index]
+        except IndexError as e:
+            raise PlaylistError("Invalid position.") from e
         del self.playque[index]
         return song
 
     def move(self, oldindex: int, newindex: int):
-        song = self._check_and_get(oldindex)
-        self._check_and_get(newindex)
+        if oldindex < 0 or newindex < 0:
+            raise PlaylistError("Negative indexes are not supported.")
+        if oldindex == 0 or newindex == 0:
+            raise PlaylistError(
+                "Cannot move the first song since it's already playing."
+            )
+        try:
+            temp = self.playque[oldindex]
+        except IndexError as e:
+            raise PlaylistError("Invalid position.") from e
         del self.playque[oldindex]
-        self.playque.insert(newindex, song)
+        self.playque.insert(newindex, temp)
 
     def empty(self):
         self.playque.clear()
@@ -134,7 +116,7 @@ class Playlist:
 
     def queue_embed(self) -> Embed:
         embed = Embed(
-            title=config.QUEUE_TITLE.format(tracks_number=len(self.playque)),
+            title=":scroll: Queue [{}]".format(len(self.playque)),
             color=config.EMBED_COLOR,
         )
 
@@ -144,9 +126,7 @@ class Playlist:
             embed.add_field(
                 name="{}.".format(str(counter)),
                 value="[{}]({})".format(
-                    song.info.title
-                    or song.info.webpage_url.partition("://")[2],
-                    song.info.webpage_url,
+                    song.info.title or song.info.webpage_url, song.info.webpage_url
                 ),
                 inline=False,
             )

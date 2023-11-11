@@ -1,87 +1,34 @@
 from __future__ import annotations
 import re
+import os
 import sys
-import _thread
+import ast
 import asyncio
-import subprocess
-from enum import Enum
-from aioconsole import ainput
-from subprocess import CalledProcessError, check_output
-from typing import TYPE_CHECKING, Callable, Awaitable, Optional, Union
+from subprocess import DEVNULL, check_call
+from typing import TYPE_CHECKING, Callable, Awaitable, Optional, Union, TypeVar
 
-from discord import (
-    __version__ as pycord_version,
-    opus,
-    utils,
-    Guild,
-    Emoji,
-)
-from discord.ext.commands import CommandError
-from emoji import is_emoji
+try:
+    from discord import opus, utils, Guild, Message, VoiceChannel, Emoji
+    from emoji import is_emoji
+except ImportError:
+    if not os.getenv("DANDELION_INSTALLING"):
+        raise
 
 from config import config
 
 # avoiding circular import
 if TYPE_CHECKING:
-    from musicbot.bot import Context
-
-
-OLD_FFMPEG_CONF = """
-ffmpeg version 5.1.git Copyright (c) 2000-2022 the FFmpeg developers
-built with gcc 12.1.0 (Rev2, Built by MSYS2 project)
-configuration: --disable-programs --enable-ffmpeg --disable-doc\
- --enable-w32threads --enable-openssl --extra-ldflags=-static\
- --pkg-config='pkg-config --static --with-path=/usr/local/lib/pkgconfig'
-libavutil      57. 33.101 / 57. 33.101
-libavcodec     59. 42.102 / 59. 42.102
-libavformat    59. 30.100 / 59. 30.100
-libavdevice    59.  8.101 / 59.  8.101
-libavfilter     8. 46.103 /  8. 46.103
-libswscale      6.  8.103 /  6.  8.103
-libswresample   4.  8.100 /  4.  8.100
-""".strip()
-FFMPEG_ZIP_URL = (
-    "https://github.com/Krutyi-4el/FFmpeg/"
-    "releases/download/v6.0.git/ffmpeg.zip"
-)
-NEWEST_FFMPEG_TIMESTAMP = "1695376413"
-
-
-def extract_ffmpeg_timestamp(version):
-    version = version.split()
-    if len(version) > 2:
-        timestamp = version[2].partition("-K4_")[2]
-        if timestamp:
-            return timestamp
-    return None
+    from musicbot.bot import MusicBot, Context
 
 
 def check_dependencies():
-    assert pycord_version == "2.5.4", (
-        "you don't have necessary version of Pycord."
-        " Please install the version specified in requirements.txt"
-    )
-
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    ffmpeg_output = None
     try:
-        ffmpeg_output = check_output(
-            ("ffmpeg", "-version"), text=True, creationflags=flags
-        ).strip()
-    except (FileNotFoundError, CalledProcessError) as e:
+        check_call("ffmpeg --help", stdout=DEVNULL, stderr=DEVNULL, shell=True)
+    except Exception as e:
         if sys.platform == "win32":
-            print("Downloading FFmpeg...")
             download_ffmpeg()
         else:
             raise RuntimeError("ffmpeg was not found") from e
-    if sys.platform == "win32" and ffmpeg_output:
-        ffmpeg_timestamp = extract_ffmpeg_timestamp(ffmpeg_output)
-        if ffmpeg_output == OLD_FFMPEG_CONF or (
-            ffmpeg_timestamp and ffmpeg_timestamp < NEWEST_FFMPEG_TIMESTAMP
-        ):
-            print("Updating FFmpeg...")
-            download_ffmpeg()
-
     try:
         opus.Encoder.get_opus_version()
     except opus.OpusNotLoaded as e:
@@ -94,8 +41,9 @@ def download_ffmpeg():
     from zipfile import ZipFile
     from urllib.request import urlopen
 
+    print("Downloading ffmpeg automatically...")
     stream = urlopen(
-        FFMPEG_ZIP_URL,
+        "https://github.com/Krutyi-4el/FFmpeg/releases/download/v5.1.git/ffmpeg.zip",
         context=SSLContext(),
     )
     total_size = int(stream.getheader("content-length") or 0)
@@ -105,8 +53,7 @@ def download_ffmpeg():
 
         data = stream.read(BLOCK_SIZE)
         received_size = BLOCK_SIZE
-        percentage = 0
-        print("0%", end="")
+        percentage = -1
         while data:
             file.write(data)
             data = stream.read(BLOCK_SIZE)
@@ -118,62 +65,62 @@ def download_ffmpeg():
     else:
         file.write(stream.read())
     zipf = ZipFile(file)
-    filename = [
-        name for name in zipf.namelist() if name.endswith("ffmpeg.exe")
-    ][0]
+    filename = [name for name in zipf.namelist() if name.endswith("ffmpeg.exe")][0]
     with open("ffmpeg.exe", "wb") as f:
         f.write(zipf.read(filename))
     print("\nSuccess!")
 
 
-class CheckError(CommandError):
-    pass
+def get_guild(bot: MusicBot, command: Message) -> Optional[Guild]:
+    """Gets the guild a command belongs to. Useful, if the command was sent via pm.
+    DOES NOT WORK WITHOUT MEMBERS INTENT"""
+    if command.guild is not None:
+        return command.guild
+    for guild in bot.guilds:
+        for channel in guild.voice_channels:
+            if command.author in channel.members:
+                return guild
+    return None
 
 
-async def dj_check(ctx: Context):
-    "Check if the user has DJ permissions"
-    if ctx.channel.permissions_for(ctx.author).administrator:
-        return True
+async def connect_to_channel(
+    guild: Guild, dest_channel_name, ctx, switch: bool = False, default: bool = True
+):
+    """Connects the bot to the specified voice channel.
 
-    sett = ctx.bot.settings[ctx.guild]
-    if sett.dj_role:
-        if int(sett.dj_role) not in [r.id for r in ctx.author.roles]:
-            raise CheckError(config.NOT_A_DJ)
-        return True
+    Args:
+        guild: The guild for witch the operation should be performed.
+        switch: Determines if the bot should disconnect from his current channel to switch channels.
+        default: Determines if the bot should default to the first channel, if the name was not found.
+    """
+    for channel in guild.voice_channels:
+        if str(channel.name).strip() == str(dest_channel_name).strip():
+            if switch:
+                try:
+                    await guild.voice_client.disconnect()
+                except Exception:
+                    await ctx.send(config.NOT_CONNECTED_MESSAGE)
 
-    raise CheckError(config.USER_MISSING_PERMISSIONS)
+            await channel.connect()
+            return
+
+    if default:
+        try:
+            await guild.voice_channels[0].connect()
+        except Exception:
+            await ctx.send(config.DEFAULT_CHANNEL_JOIN_FAILED)
+    else:
+        await ctx.send(config.CHANNEL_NOT_FOUND_MESSAGE + str(dest_channel_name))
 
 
-async def voice_check(ctx: Context):
-    "Check if the user can use the bot now"
-    bot_vc = ctx.guild.voice_client
-    if not bot_vc:
-        # the bot is free
-        return True
-
-    author_voice = ctx.author.voice
-    if author_voice:
-        if author_voice.channel == bot_vc.channel:
-            return True
-
-        if all(m.bot for m in bot_vc.channel.members):
-            # current channel doesn't have any user in it
-            return await ctx.bot.audio_controllers[ctx.guild].uconnect(
-                ctx, move=True
-            )
-
+async def is_connected(ctx: Context) -> Optional[VoiceChannel]:
     try:
-        if await dj_check(ctx):
-            # DJs and admins can always run commands
-            return True
-    except CheckError:
-        pass
-
-    raise CheckError(config.USER_NOT_IN_VC_MESSAGE)
+        return ctx.guild.voice_client.channel
+    except AttributeError:
+        return None
 
 
 async def play_check(ctx: Context):
-    "Prepare for music commands"
 
     sett = ctx.bot.settings[ctx.guild]
 
@@ -182,14 +129,17 @@ async def play_check(ctx: Context):
 
     if cm_channel is not None:
         if int(cm_channel) != ctx.channel.id:
-            raise CheckError(config.WRONG_CHANNEL_MESSAGE)
-
-    if not ctx.guild.voice_client:
-        return await ctx.bot.audio_controllers[ctx.guild].uconnect(ctx)
+            await ctx.send(config.WRONG_CHANNEL_MESSAGE)
+            return False
 
     if vc_rule:
-        return await voice_check(ctx)
-
+        author_voice = ctx.author.voice
+        bot_vc = ctx.guild.voice_client
+        if not bot_vc:
+            return await ctx.bot.audio_controllers[ctx.guild].uconnect(ctx)
+        if not author_voice or author_voice.channel != bot_vc.channel:
+            await ctx.send(config.USER_NOT_IN_VC_MESSAGE)
+            return False
     return True
 
 
@@ -204,38 +154,60 @@ def get_emoji(guild: Guild, string: str) -> Optional[Union[str, Emoji]]:
     return utils.get(guild.emojis, name=string)
 
 
-# StrEnum doesn't exist in Python < 3.11
-class StrEnum(str, Enum):
-    def __str__(self):
-        return self._value_
+def compare_components(obj1, obj2):
+    "compare two objects recursively but ignore custom_id in dicts"
+    if isinstance(obj1, (list, tuple)) and isinstance(obj2, (list, tuple)):
+        if len(obj1) != len(obj2):
+            return False
+        return all(compare_components(x1, x2) for x1, x2 in zip(obj1, obj2))
+    elif isinstance(obj1, dict) and isinstance(obj2, dict):
+        obj1.pop("custom_id", None)
+        obj2.pop("custom_id", None)
+        if obj1.keys() != obj2.keys():
+            return False
+        return all(compare_components(obj1[k], obj2[k]) for k in obj1)
+    return obj1 == obj2
+
+
+T = TypeVar("T")
+
+
+def get_env_var(key: str, default: T) -> T:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        value = ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        pass
+    assert type(value) == type(default), f"invalid value for {key}: {value!r}"
+    return value
+
+
+def alchemize_url(url: str) -> str:
+    SCHEMES = (
+        ("sqlite", "sqlite+aiosqlite"),
+        ("postgres", "postgresql+asyncpg"),
+        ("mysql", "mysql+aiomysql"),
+    )
+
+    for name, scheme in SCHEMES:
+        if url.startswith(name):
+            return url.replace(name, scheme, 1)
+    return url
 
 
 class Timer:
     def __init__(self, callback: Callable[[], Awaitable]):
         self._callback = callback
-        self._task = None
-        self.triggered = False
+        self._task = asyncio.create_task(self._job())
 
     async def _job(self):
         await asyncio.sleep(config.VC_TIMEOUT)
-        self.triggered = True
         await self._callback()
-        self.triggered = False
-        self._task = None
-
-    # we need event loop here
-    async def start(self, restart=False):
-        if self._task:
-            if restart:
-                self._task.cancel()
-            else:
-                return
-        self._task = asyncio.create_task(self._job())
 
     def cancel(self):
-        if self._task:
-            self._task.cancel()
-            self._task = None
+        self._task.cancel()
 
 
 class OutputWrapper:
@@ -249,19 +221,12 @@ class OutputWrapper:
         try:
             ret = self.stream.write(text)
             if not self.using_log_file:
-                self.flush()
+                self.stream.flush()
         except Exception:
             self.using_log_file = True
             self.stream = self.get_log_file()
             ret = self.stream.write(text)
         return ret
-
-    def flush(self):
-        try:
-            self.stream.flush()
-        except Exception:
-            self.using_log_file = True
-            self.stream = self.get_log_file()
 
     def __getattr__(self, key):
         return getattr(self.stream, key)
@@ -272,12 +237,3 @@ class OutputWrapper:
             return cls.log_file
         cls.log_file = open("log.txt", "w", encoding="utf-8")
         return cls.log_file
-
-
-async def read_shutdown():
-    try:
-        line = await ainput()
-    except EOFError:
-        return
-    if line == "shutdown":
-        _thread.interrupt_main()

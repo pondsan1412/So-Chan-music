@@ -1,5 +1,5 @@
 import datetime
-from typing import Optional, Union
+from typing import Optional
 
 import discord
 from config import config
@@ -21,9 +21,7 @@ class Song:
         self.host = host
         self.origin = origin
         self.base_url = base_url
-        self.info = self.Sinfo(
-            uploader, title, duration, webpage_url, thumbnail
-        )
+        self.info = self.Sinfo(uploader, title, duration, webpage_url, thumbnail)
 
     class Sinfo:
         def __init__(
@@ -39,8 +37,11 @@ class Song:
             self.duration = duration
             self.webpage_url = webpage_url
             self.thumbnail = thumbnail
+            self.output = ""
+            
 
         def format_output(self, playtype):
+
             embed = discord.Embed(
                 title=playtype,
                 description="[{}]({})".format(self.title, self.webpage_url),
@@ -51,35 +52,31 @@ class Song:
                 embed.set_thumbnail(url=self.thumbnail)
 
             embed.add_field(
-                name=config.SONGINFO_UPLOADER,
-                value=self.uploader,
-                inline=False,
+                name=config.SONGINFO_UPLOADER, value=self.uploader, inline=False
             )
-
-            embed.add_field(
-                name=config.SONGINFO_DURATION,
-                value=(
-                    str(datetime.timedelta(seconds=self.duration))
-                    if self.duration is not None
-                    else config.SONGINFO_UNKNOWN
-                ),
-                inline=False,
-            )
+            
+            embed.set_footer(icon_url=config.pfp_sochan,
+                             text=config.footer_string)
+            embed.set_image(url=config.set_image_sochan)
+            if self.duration is not None:
+                embed.add_field(
+                    name=config.SONGINFO_DURATION,
+                    value="{}".format(str(datetime.timedelta(seconds=self.duration))),
+                    inline=False,
+                )
+            else:
+                embed.add_field(
+                    name=config.SONGINFO_DURATION,
+                    value=config.SONGINFO_UNKNOWN_DURATION,
+                    inline=False,
+                )
 
             return embed
 
-    def update(self, data: Union[dict, "Song"]):
-        if isinstance(data, Song):
-            self.base_url = data.base_url
-            self.info = data.info
-            return
-
+    def update(self, data: dict):
         self.base_url = data.get("url")
         self.info.uploader = data.get("uploader")
         self.info.title = data.get("title")
         self.info.duration = data.get("duration")
         self.info.webpage_url = data.get("webpage_url")
-        thumbnails = data.get("thumbnails")
-        if thumbnails:
-            # last thumbnail has the best resolution
-            self.info.thumbnail = thumbnails[-1]["url"]
+        self.info.thumbnail = data.get("thumbnails")[0]["url"]

@@ -6,6 +6,8 @@ __pycache__
 /dist
 
 /config.json
-/config/config_comments.json
 /settings.db
 /log.txt
+config/config.py
+config/config.py
+config/config.py

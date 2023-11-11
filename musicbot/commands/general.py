@@ -1,15 +1,11 @@
-import sys
 import asyncio
-
 import discord
-from discord.ext import commands, bridge
-
 from config import config
+from discord.ext import commands, bridge
+from discord.ext.commands import has_permissions
 from musicbot.bot import Context, MusicBot
-from musicbot.settings import CONFIG_OPTIONS, ConversionError
 from musicbot.audiocontroller import AudioController
-from musicbot.utils import dj_check, voice_check
-
+import time
 
 class General(commands.Cog):
     """A collection of the commands for moving the bot around in you server.
@@ -23,104 +19,81 @@ class General(commands.Cog):
 
     # logic is split to uconnect() for wide usage
     @bridge.bridge_command(
-        name="connect",
+        name="join",
         description=config.HELP_CONNECT_LONG,
         help=config.HELP_CONNECT_SHORT,
-        aliases=["c", "cc"],  # this command replaces removed changechannel
+        aliases=["c"],
     )
-    @commands.check(voice_check)
-    async def _connect(self, ctx: Context):
+    async def _connect(self, ctx: Context):  # dest_channel_name: str
         audiocontroller = ctx.bot.audio_controllers[ctx.guild]
-        await audiocontroller.uconnect(ctx, move=True)
-        await ctx.send("Connected.")
+        if await audiocontroller.uconnect(ctx):
+            await ctx.send("เชื่อมต่อแล้ว.")
 
     @bridge.bridge_command(
-        name="disconnect",
+        name="leave",
         description=config.HELP_DISCONNECT_LONG,
         help=config.HELP_DISCONNECT_SHORT,
         aliases=["dc"],
     )
-    @commands.check(voice_check)
     async def _disconnect(self, ctx: Context):
         audiocontroller = ctx.bot.audio_controllers[ctx.guild]
         if await audiocontroller.udisconnect():
-            await ctx.send("Disconnected.")
+            await ctx.send("ตัดขาดการเชื่อมต่อ.")
         else:
             await ctx.send(config.NOT_CONNECTED_MESSAGE)
-
+        ch_send = self.bot.get_channel(config.console_commanduse)
+        await ch_send.send(f"{ctx.author} `using leave`")
     @bridge.bridge_command(
         name="reset",
         description=config.HELP_RESET_LONG,
         help=config.HELP_RESET_SHORT,
-        aliases=["rs", "restart"],
+        aliases=["rs", "restart", "cc"],  # this command replaces removed changechannel
     )
-    @commands.check(voice_check)
     async def _reset(self, ctx: Context):
         await ctx.defer()
         if await ctx.bot.audio_controllers[ctx.guild].udisconnect():
             # bot was connected and need some rest
             await asyncio.sleep(1)
 
-        audiocontroller = ctx.bot.audio_controllers[
-            ctx.guild
-        ] = AudioController(self.bot, ctx.guild)
-        await audiocontroller.uconnect(ctx)
-        await ctx.send(
-            "{} Connected to {}".format(
-                ":white_check_mark:", ctx.author.voice.channel.name
-            )
+        audiocontroller = ctx.bot.audio_controllers[ctx.guild] = AudioController(
+            self.bot, ctx.guild
         )
+        if await audiocontroller.uconnect(ctx):
+            await ctx.send(
+                "{} เชื่อมต่อไปยัง {}".format(
+                    ":white_check_mark:", ctx.author.voice.channel.name
+                )
+            )
+        ch_send = self.bot.get_channel(config.console_commanduse)
+        await ch_send.send(f"{ctx.author} `using reset`")
 
     @bridge.bridge_command(
-        name="ping",
-        description=config.HELP_PING_LONG,
-        help=config.HELP_PING_SHORT,
-    )
-    async def _ping(self, ctx):
-        await ctx.send(f"Pong ({int(ctx.bot.latency * 1000)} ms)")
-
-    @commands.command(
-        name="shutdown",
-        hidden=True,
-    )
-    @commands.is_owner()
-    async def _shutdown(self, ctx: Context):
-        await ctx.send("Shutting down...")
-        # hide SystemExit error message
-        sys.excepthook = lambda *_: None
-        sys.exit()
-
-    @bridge.bridge_group(
         name="setting",
         description=config.HELP_SETTINGS_LONG,
         help=config.HELP_SETTINGS_SHORT,
         aliases=["settings", "set"],
-        usage="[setting_name setting_value]",
-        invoke_without_command=True,
     )
-    async def _settings(self, ctx: Context, *, inexistent_setting=None):
-        if inexistent_setting is not None:
-            await ctx.send("`Error: Setting not found`")
-        else:
-            await self._show_settings_callback(ctx)
+    @has_permissions(administrator=True)
+    async def _settings(self, ctx: Context, setting=None, *, value=None):
 
-    async def _show_settings_callback(self, ctx: Context):
         sett = ctx.bot.settings[ctx.guild]
-        await ctx.send(embed=sett.format(ctx))
 
-    _show_settings = _settings.command(name="show")(_show_settings_callback)
+        if setting is None and value is None:
+            await ctx.send(embed=sett.format(ctx))
+            return
 
-    for name, type_ in CONFIG_OPTIONS.items():
+        if setting is None or value is None:
+            await ctx.send("Error: setting or value is missing.")
+            return
 
-        @_settings.command(name=name)
-        @commands.check(dj_check)
-        async def _set_setting(self, ctx: Context, *, value: type_):
-            sett = ctx.bot.settings[ctx.guild]
-            try:
-                await sett.update_setting(ctx.command.name, value, ctx)
-            except ConversionError as e:
-                await ctx.send(f"`Error: {e}`")
-                return
+        response = await sett.process_setting(setting, value, ctx)
+
+        if response is None:
+            await ctx.send("`Error: Setting not found`")
+        elif response is True:
+            async with ctx.bot.DbSession() as session:
+                session.add(sett)
+                await session.commit()
             await ctx.send("Setting updated!")
 
     @bridge.bridge_command(
@@ -131,14 +104,39 @@ class General(commands.Cog):
     async def _addbot(self, ctx):
         embed = discord.Embed(
             title="Invite",
-            description=config.ADD_MESSAGE.format(
-                link=discord.utils.oauth_url(self.bot.user.id)
-            ),
-            color=config.EMBED_COLOR,
+            description=config.ADD_MESSAGE
+            + "({})".format(discord.utils.oauth_url(self.bot.user.id)),
         )
 
         await ctx.send(embed=embed)
-
+    @bridge.bridge_command(name='credit', description=config.HELP_CREDIT_LONG, help=config.HELP_CREDIT_SHORT)
+    async def _credit(self, ctx):
+        global embedDonate,donate_url
+        
+        embed = discord.Embed(title='Developer of So-Chan',description="",color=discord.Color.blue())
+        embed.set_image(url="https://camo.githubusercontent.com/84cff396f554e61c599fbab6e32959abd4862298944e26c68b8bb0a2579feddf/68747470733a2f2f7376312e7069637a2e696e2e74682f696d616765732f323032332f30322f32382f654e463772382e6d642e706e67")
+        embed.set_footer(text="ชื่อบัญชี \n ธนาคารไทยพานิชย์ & พร้อมเพย์ \n เลขที่บัญชี 408-052219-9 \n พร้อมเพย์ 0639520317 ")
+        await ctx.send(embed=embed)
+    @bridge.bridge_command(
+        name="feedback",
+        help="feedback หา dev เผื่อเหตการณ์บอทเสียหรือต้องการแนะนำติเตือนใดๆ พร้อมรับฟังทั้งหมดครับ",
+        description="this is like feedback dm to dev immediatly"
+    )
+    async def _feedback(self,ctx:commands.Context,ฝากข้อความถึงผู้พัฒนา):
+        try:
+            owner_bot = self.bot.get_channel(config.feedback_channel_id)
+            await owner_bot.send(f"`{ctx.author}`{ฝากข้อความถึงผู้พัฒนา}")
+            member = await self.bot.fetch_user(324207503816654859)
+            await member.send(f"{ctx.author}{ฝากข้อความถึงผู้พัฒนา}")
+            await ctx.send(f"ทางเราได้รับ feedback จากคุณ{ctx.author.mention} เรียบร้อยแล้วนะคะ")
+            time.sleep(3)
+            await ctx.send(f"จะมีการอัพเดทภายหลังโปรดติดตามการเคลื่อนไหวที่เพจ So-Chan ค่ะ {config.shy_cat}")
+            
+        except:
+             pass
+#donate 
+embedDonate = discord.Embed(title='ชื่อบัญชี',description='ธนาคารไทยพานิชย์ & พร้อมเพย์ \n เลขที่บัญชี 408-052219-9 \n พร้อมเพย์ 0639520317')
+donate_url = "https://i.pinimg.com/236x/eb/c8/c5/ebc8c5eb8077eca566b83387b6169ab2.jpg"
 
 def setup(bot: MusicBot):
     bot.add_cog(General(bot))
