@@ -1,233 +1,198 @@
+# fmt: off
+
 import os
-import sys
-import ast
-import jsonc
-import inspect
-import warnings
-from typing import Optional
+import json
 
-sys.path.insert(0, os.path.dirname(__file__))
-from utils import (  # noqa: E402
-    CONFIG_DIRS,
-    Formatter,
-    get_env_var,
-    alchemize_url,
-    load_configs,
-    join_dicts,
-    subtract_dicts,
-)
-
-del sys.path[0]
+from musicbot.utils import get_env_var, alchemize_url
 
 
-class Config:
-    BOT_TOKEN = "YOUR_TOKEN_GOES_HERE"
-    SPOTIFY_ID = ""
-    SPOTIFY_SECRET = ""
+DEFAULTS = {
+    "BOT_TOKEN": "MTA2NjM2MjYzMDY2NDYxNzk5NA.GJCxEd.r0G3Xfv5VTtD7dNaODhogRdTD-jvfJDIfHyFS0",
+    "SPOTIFY_ID": "edfd77eaf8ce45beb5044a60c23891c4",
+    "SPOTIFY_SECRET": "14975270a1b146e9b931b7638305130f",
 
-    # set to empty string to disable
-    BOT_PREFIX = "d!"
-    ENABLE_SLASH_COMMANDS = False
-    MENTION_AS_PREFIX = True
+    "BOT_PREFIX": "!",  # set to empty string to disable
+    "ENABLE_SLASH_COMMANDS": True,
 
-    # seconds
-    VC_TIMEOUT = 600
-    # default template setting for VC timeout
-    # true = yes, timeout; false = no timeout
-    VC_TIMEOUT_DEFAULT = True
-    # allow or disallow editing the vc_timeout guild setting
-    ALLOW_VC_TIMEOUT_EDIT = True
+    "VC_TIMEOUT": 600,  # seconds
+    "VC_TIMOUT_DEFAULT": True,  # default template setting for VC timeout true= yes, timeout false= no timeout
 
-    # maximum of 25
-    MAX_SONG_PRELOAD = 5
-    MAX_HISTORY_LENGTH = 10
-    MAX_TRACKNAME_HISTORY_LENGTH = 15
+    "MAX_SONG_PRELOAD": 5,  # maximum of 25
+    "MAX_HISTORY_LENGTH": 10,
+    "MAX_TRACKNAME_HISTORY_LENGTH": 15,
 
     # if database is not one of sqlite, postgres or MySQL
     # you need to provide the url in SQL Alchemy-supported format.
     # Must be async-compatible
     # CHANGE ONLY IF YOU KNOW WHAT YOU'RE DOING
-    DATABASE_URL = os.getenv("HEROKU_DB") or "sqlite:///settings.db"
+    "DATABASE_URL": os.getenv("HEROKU_DB") or "sqlite:///settings.db",
+}
 
-    ENABLE_BUTTON_PLUGIN = True
 
-    # replace after '0x' with desired hex code ex. '#ff0188' >> "0xff0188"
-    EMBED_COLOR: int = "0x4DD4D0"  # converted to int in __init__
+if os.path.isfile("config.json"):
+    with open("config.json") as f:
+        DEFAULTS.update(json.load(f))
+elif not os.getenv("DANDELION_INSTALLING"):
+    with open("config.json", "w") as f:
+        json.dump(DEFAULTS, f, indent=2)
 
-    SUPPORTED_EXTENSIONS = (
-        ".webm",
-        ".mp4",
-        ".mp3",
-        ".avi",
-        ".wav",
-        ".m4v",
-        ".ogg",
-        ".mov",
-    )
 
-    COOKIE_PATH = "config/cookies/cookies.txt"
+for key, default in DEFAULTS.items():
+    globals()[key] = get_env_var(key, default)
 
-    GLOBAL_DISABLE_AUTOJOIN_VC = False
 
-    def __init__(self):
-        current_cfg = self.load()
+MENTION_AS_PREFIX = True
 
-        # prefix to display
-        current_cfg["prefix"] = (
-            self.BOT_PREFIX
-            if self.BOT_PREFIX
-            else ("/" if self.ENABLE_SLASH_COMMANDS else "@bot ")
-        )
+ENABLE_BUTTON_PLUGIN = True
 
-        self.DATABASE = alchemize_url(self.DATABASE_URL)
-        self.DATABASE_LIBRARY = self.DATABASE.partition("+")[2].partition(":")[
-            0
-        ]
+EMBED_COLOR = 0x4dd4d0  # replace after'0x' with desired hex code ex. '#ff0188' >> '0xff0188'
 
-        self.EMBED_COLOR = int(self.EMBED_COLOR, 16)
-        for dir_ in CONFIG_DIRS[::-1]:
-            path = os.path.join(dir_, self.COOKIE_PATH)
-            if os.path.isfile(path):
-                self.COOKIE_PATH = path
-                break
+SUPPORTED_EXTENSIONS = (".webm", ".mp4", ".mp3", ".avi", ".wav", ".m4v", ".ogg", ".mov")
 
-        data = join_dicts(
-            load_configs(
-                "en.json",
-                lambda d: {
-                    k: Formatter(v).format(current_cfg)
-                    if isinstance(v, str)
-                    else v
-                    for k, v in d.items()
-                },
-            )
-        )
 
-        self.messages = {}
-        self.dicts = {}
-        for k, v in data.items():
-            if isinstance(v, str):
-                self.messages[k] = v
-            elif isinstance(v, dict):
-                self.dicts[k] = v
+COOKIE_PATH = "/config/cookies/cookies.txt"
 
-    def load(self) -> dict:
-        loaded_cfgs = load_configs(
-            "config.json",
-            lambda d: {
-                k: tuple(v) if isinstance(v, list) else v for k, v in d.items()
-            },
-        )
+GLOBAL_DISABLE_AUTOJOIN_VC = True
 
-        current_cfg = self.as_dict()
-        loaded_joined = join_dicts(loaded_cfgs)
-        # recognise deprecated cfg key with a typo
-        if "VC_TIMOUT_DEFAULT" in loaded_joined:
-            # in config, silently replace
-            current_cfg["VC_TIMEOUT_DEFAULT"] = loaded_joined.pop(
-                "VC_TIMOUT_DEFAULT"
-            )
-        if "VC_TIMOUT_DEFAULT" in os.environ:
-            # in env, we can't fix it easily
-            raise RuntimeError(
-                "Please rename VC_TIMOUT_DEFAULT"
-                " to VC_TIMEOUT_DEFAULT in your environment"
-            )
-        missing = subtract_dicts(current_cfg, loaded_joined)
-        self.unknown_vars = subtract_dicts(loaded_joined, current_cfg)
+ALLOW_VC_TIMEOUT_EDIT = True  # allow or disallow editing the vc_timeout guild setting
 
-        if missing:
-            missing.update(loaded_cfgs[-1])
-            self.to_save = missing
-        else:
-            self.to_save = None
 
-        current_cfg.update(loaded_joined)
+actual_prefix = (  # for internal use
+    BOT_PREFIX
+    if BOT_PREFIX
+    else ("/" if ENABLE_SLASH_COMMANDS else "@bot ")
+)
 
-        for key, default in current_cfg.items():
-            current_cfg[key] = get_env_var(key, default)
+# set db url during install even if it's overriden by env
+if os.getenv("DANDELION_INSTALLING") and not DATABASE_URL:
+    DATABASE_URL = DEFAULTS["DATABASE_URL"]
+DATABASE = alchemize_url(DATABASE_URL)
+DATABASE_LIBRARY = DATABASE.partition("+")[2].partition(":")[0]
 
-        # Embeds are limited to 25 fields
-        current_cfg["MAX_SONG_PRELOAD"] = min(
-            current_cfg["MAX_SONG_PRELOAD"], 25
-        )
 
-        self.update(current_cfg)
-        return current_cfg
+STARTUP_MESSAGE = "Starting Bot..."
+STARTUP_COMPLETE_MESSAGE = "Startup Complete"
 
-    def __getattr__(self, key: str) -> str:
-        try:
-            return self.messages[key]
-        except KeyError as e:
-            raise AttributeError(f"No text for {key!r} defined") from e
+NO_GUILD_MESSAGE = "Error: โปรดเข้าร่วมช่องเสียงหรือป้อนคำสั่งในแชท server"
+USER_NOT_IN_VC_MESSAGE = "Error: โปรดเข้าร่วมช่องเสียงก่อนใช้คำสั่ง"
+WRONG_CHANNEL_MESSAGE = "Error: โปรดใช้ช่องคำสั่งที่กำหนดค่าไว้"
+NOT_CONNECTED_MESSAGE = "Error: บอทไม่ได้เชื่อมต่อกับช่องเสียงใดๆค่ะ"
+ALREADY_CONNECTED_MESSAGE = "Error: เชื่อมต่อกับช่องเสียงอยู่แล้วค่ะ"
+CHANNEL_NOT_FOUND_MESSAGE = "Error: หาห้องไม่เจอค่ะ"
+DEFAULT_CHANNEL_JOIN_FAILED = "Error: ไม่สามารถเข้าร่วม default voice channel"
+INVALID_INVITE_MESSAGE = "Error: ลิงก์คำเชิญไม่ถูกต้อง"
 
-    def get_dict(self, name: str) -> dict:
-        return self.dicts[name]
+ADD_MESSAGE = "ในการเพิ่มบอทนี้ไปยังเซิร์ฟเวอร์ของคุณเอง, click [here]"  # brackets will be the link text
 
-    def save(self):
-        if not self.to_save:
-            return
-        comments = self.get_comments()
-        if comments:
-            # sort according to definition order
-            self.to_save = {
-                k: self.to_save[k] for k in comments if k in self.to_save
-            }
-        with open("config.json", "w") as f:
-            jsonc.dump(
-                self.to_save,
-                f,
-                indent=2,
-                trailing_comma=True,
-                comments=comments,
-            )
-            f.write("\n")
-        self.to_save = None
+INFO_HISTORY_TITLE = "Songs Played:"
 
-    def warn_unknown_vars(self):
-        for name in self.unknown_vars:
-            warnings.warn(f"Unknown variable in config: {name}")
+SONGINFO_UPLOADER = "ผู้อัพโหลด: "
+SONGINFO_DURATION = "ระยะเวลา:  "
+SONGINFO_SECONDS = "s"
+SONGINFO_LIKES = "Likes: "
+SONGINFO_DISLIKES = "Dislikes: "
+SONGINFO_NOW_PLAYING = "Now Playing"
+SONGINFO_QUEUE_ADDED = "ถูกเพิ่มไปยัง Queue"
+SONGINFO_SONGINFO = "Song info"
+SONGINFO_ERROR = "Error: ไม่สามารถเล่นเพลงนี้ได้ อาจจะติดปัญหาจำกัดอายุ หรือ content ที่ เป็นเฉพาะ member \n หรืออื่นๆ"
+SONGINFO_PLAYLIST_QUEUED = "Queued playlist :page_with_curl:"
+SONGINFO_UNKNOWN_DURATION = "Unknown"
+QUEUE_EMPTY = "Queue is empty :x:"
 
-    def update(self, data: dict):
-        for k, v in data.items():
-            setattr(self, k, v)
+HELP_ADDBOT_SHORT = "เพิ่ม Bot ไปยังเซิร์ฟเวอร์อื่น"
+HELP_ADDBOT_LONG = "ให้ลิงค์สำหรับเพิ่มบอทนี้ไปยังเซิร์ฟเวอร์อื่นของคุณ."
+HELP_CONNECT_SHORT = "เชื่อมต่อบอทกับช่องเสียง"
+HELP_CONNECT_LONG = "เชื่อมต่อบอทกับช่องเสียงที่คุณอยู่"
+HELP_DISCONNECT_SHORT = "ตัดการเชื่อมต่อบอทจากช่องเสียง"
+HELP_DISCONNECT_LONG = "ตัดการเชื่อมต่อบอทจากช่องเสียงและหยุดเสียง."
 
-    @classmethod
-    def as_dict(cls) -> dict:
-        return {
-            k: v
-            for k, v in inspect.getmembers(cls)
-            if not k.startswith("__") and not inspect.isroutine(v)
-        }
+HELP_SETTINGS_SHORT = "ดูและตั้งค่าบอท"
+HELP_SETTINGS_LONG = "View and set bot settings in the server. Usage: {}settings setting_name value".format(actual_prefix)
 
-    @classmethod
-    def get_comments(cls) -> Optional[dict]:
-        try:
-            src = inspect.getsource(cls)
-        except OSError:
-            fallback = os.path.join(
-                getattr(sys, "_MEIPASS", ""), "config_comments.json"
-            )
-            if os.path.isfile(fallback):
-                with open(fallback) as f:
-                    return jsonc.load(f)
-            return None
-        result = {}
-        body = ast.parse(src).body[0].body
-        src = src.splitlines()
-        for node in body:
-            if isinstance(node, ast.Assign):
-                target = node.targets[0]
-            elif isinstance(node, ast.AnnAssign):
-                target = node.target
-            else:
-                target = None
-            if target is not None:
-                comment = ""
-                for i in range(node.lineno - 2, -1, -1):
-                    line = src[i].strip()
-                    if line and not line.startswith("#"):
-                        break
-                    comment = line[1:].strip() + "\n" + comment
-                result[target.id] = comment
-        return result
+HELP_HISTORY_SHORT = "แสดงประวัติของเพลง"
+HELP_HISTORY_LONG = "แสดง " + str(MAX_TRACKNAME_HISTORY_LENGTH) + " เพลงที่เล่นล่าสุด."
+HELP_PAUSE_SHORT = "หยุดเพลงชั่วคราว"
+HELP_PAUSE_LONG = "หยุด AudioPlayer ชั่วคราว ใช้อีกครั้งเพื่อเล่นต่อ."
+HELP_VOL_SHORT = "Change volume %"
+HELP_VOL_LONG = "Changes the volume of the AudioPlayer. Argument specifies the % to which the volume should be set."
+HELP_PREV_SHORT = "ย้อนกลับไปเพลงก่อนหน้า"
+HELP_PREV_LONG = "เล่นเพลงก่อนหน้าอีกครั้ง."
+HELP_SKIP_SHORT = "ข้ามเพลง"
+HELP_SKIP_LONG = "ข้ามเพลงที่กำลังเล่นอยู่และไปที่รายการถัดไปในคิว."
+HELP_SONGINFO_SHORT = "ข้อมูลเกี่ยวกับเพลงปัจจุบัน"
+HELP_SONGINFO_LONG = "แสดงรายละเอียดเกี่ยวกับเพลงที่กำลังเล่นและโพสต์ลิงก์ไปยังเพลง."
+HELP_STOP_SHORT = "หยุดเพลง"
+HELP_STOP_LONG = "Stops the AudioPlayer and clears the songqueue"
+HELP_MOVE_LONG = f"{actual_prefix}move [position] [new position]"
+HELP_MOVE_SHORT = "ย้ายแทร็กในคิว"
+HELP_YT_SHORT = "เล่นเพลงที่ด้วย link หรือ พิมพ์ keyword"
+HELP_YT_LONG = f"{actual_prefix}p [link/video title/keywords/playlist/soundcloud link/spotify link/bandcamp link/twitter link]"
+HELP_PING_SHORT = "Pong"
+HELP_PING_LONG = "Test bot response status"
+HELP_CLEAR_SHORT = "เคลียร์คิว."
+HELP_CLEAR_LONG = "ล้างคิวและข้ามเพลงปัจจุบัน."
+HELP_LOOP_SHORT = "วนซ้ำเพลงหรือคิวที่กำลังเล่นอยู่."
+HELP_LOOP_LONG = "วนซ้ำเพลงหรือคิวที่กำลังเล่นอยู่. Modes are all/single/off."
+HELP_QUEUE_SHORT = "แสดงเพลงในคิว."
+HELP_QUEUE_LONG = "Shows the number of songs in queue, up to 10."
+HELP_SHUFFLE_SHORT = "สับเปลี่ยนคิว"
+HELP_SHUFFLE_LONG = "สุ่มเรียงเพลงในคิวปัจจุบัน"
+HELP_RESET_SHORT = "ตัดการเชื่อมต่อและเชื่อมต่อใหม่"
+HELP_RESET_LONG = "หยุดเครื่องเล่น ตัดการเชื่อมต่อ และเชื่อมต่อกับช่องที่คุณอยู่อีกครั้ง"
+HELP_REMOVE_SHORT = "ลบเพลง"
+HELP_REMOVE_LONG = "อนุญาตให้ลบเพลงออกจากคิวโดยพิมพ์ตำแหน่ง (ค่าเริ่มต้นคือเพลงสุดท้าย)."
+HELP_CREDIT_SHORT = "ข้อมูลนักพัฒนาบอท So-Chan"
+HELP_CREDIT_LONG = "ข้อมูลของนักพัฒนา discord bot `So-Chan` และผู้ร่วมลงทุนการพัฒนาบอทตัวนี้"
+HELP_LYRICS_SHORT = "แสดงเนื้อเพลงต่างๆ เช่น `!lyrics fix you coldplay` "
+HELP_LYRICS_LONG = "แสดงเนื้อเพลงตา่งๆที่ เราต้องการ แต่ไม่ support เพลงไทย"
+ABSOLUTE_PATH = ""  # do not modify
+#variable to keep string
+welcome_message = [
+        'สวัสดีค่ะ',
+        'ยินดีต้อนรับค่ะ',
+        'ขอบคุณที่เป็นส่วนหนึ่งของ support! ',
+        'จ๊ะเอ๋ ไครเอ่ย สวัสดีค่าาา',
+        'สวัสดีค่ะ เราชื่อ Sochiki น้าา',
+        'landing สู่พื้นที่ราบแห่งเสียงเพลง!!!',
+        'ระหว่าง หนูกับ gpt ใครเจ๋งกว่ากัน ก็ต้องหนูอยู่แล้วเพราะหนูเปิดเพลงได้!',
+        'นายท่านคนนี้ชื่ออะไรน้า ?? ',
+        'welcome',
+        'Sochiki is happy because you are here!',
+        'เธอๆ ชื่ออะไรหรอ'
+    ]
+#embed_set_footer string
+footer_string = "ติดตามข่าวสารการอัพเดทของหนูได้ที่ https://www.facebook.com/SoChanbot"
+#channel variable to send feedback
+feedback_channel_id = 1091711073603825684
+console_fetchmsg = 1091710526100357202
+console_commanduse = 1091710872453394503
+welcome_ch = 1091610073664606230
+leave_ch = 1091696684603551794
+#guilds
+main_guild = 1091610073073205288
+
+#emoji
+shy_cat = "<:cattoblush:1043380595595673600>"
+anime_girl_dance = "<a:emoji_3:981139432059072513>"
+emoji_sochan = [
+    "<a:star1:965527914336624640>",
+    "<a:2182shakethecat:981752511734108241>",
+    "<a:3581catdead:981752511088177264>",
+    "<:5608zerotwoflushed:981752702759493632>",
+    "<:8785zerouwu:981752702402977865>",
+    "<:9263zerotwoveryhappy:981752702994374687>",
+    "<a:emoji_3:981139432059072513>",
+    "<a:joyrow:1043380805541568512>",
+    "<a:coco:1043380621910736896>",
+    "<:3301kittyblush:981625562793660436>",
+    "<a:capoo:1043380579523100773>",
+    "<a:Verify:1048059234291564544>"
+    ]
+cute_bunny = "<a:uwu:1048059229904326736>"
+#user_id
+dev_pond = 324207503816654859
+
+#embed image url
+set_image_sochan = "https://cdn.discordapp.com/attachments/1082055411462586499/1099250694915104769/2.gif"
+pfp_sochan = "https://cdn.discordapp.com/attachments/1082055411462586499/1082374273861161101/332154821_143394278332108_2809636197604585268_n.png"
+
